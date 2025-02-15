@@ -1,88 +1,59 @@
-name: Android Build
+name: Build and Upload APK
 
 on:
-  workflow_dispatch: # 支持手动触发
   push:
-    branches: [ main ]
+    branches: [ master ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
-
     steps:
-      - name: Checkout code
+      - name: Git Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Setup Android 34
-        uses: android-actions/setup-android@v2
+      - name: Restore CCache
+        uses: hendrikmuhs/ccache-action@v1.2
         with:
-          api-level: 34
-          build-tools-version: 34.0.0
+          max-size: 3Gi
 
-      - name: Set JDK 17
+      - name: Restore Gradle Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle') }}-${{ hashFiles('app/**/*.xml') }}-${{ hashFiles('app/**.kt', 'app/**.java') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle') }}-${{ hashFiles('app/**/*.xml') }}-
+            ${{ runner.os }}-gradle-${{ hashFiles('**/build.gradle') }}-
+            ${{ runner.os }}-gradle-
+
+      - name: Install Java 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '17'
 
-      # 动态获取构建工具版本
-      - name: Get build tools versions
-        id: versions
+      - name: Install Ninja Build
         run: |
-          NDK_VERSION=$(grep "ndkVersion" app/build.gradle | awk -F"'" '{print $2}')
-          echo "NDK_VERSION=$NDK_VERSION" >> $GITHUB_OUTPUT
-          
-          CMAKE_VERSION=$(grep -A5 'externalNativeBuild' app/build.gradle | grep 'version' | awk -F"'" '{print $2}')
-          echo "CMAKE_VERSION=${CMAKE_VERSION//+/}" >> $GITHUB_OUTPUT  # 移除+号
+          sudo apt-get install -y ninja-build
+          ln -s /usr/bin/ninja .
 
-      # 安装精确版本工具
-      - name: Install NDK & CMake
-        run: |
-          $ANDROID_HOME/tools/bin/sdkmanager \
-            "ndk;${{ steps.versions.outputs.NDK_VERSION }}" \
-            "cmake;${{ steps.versions.outputs.CMAKE_VERSION }}"
-
-      # 优化缓存配置
-      - name: Cache dependencies
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.android/build-cache
-            ~/.kotlin/cache
-            ~/.hilt
-            .ccache
-          key: android-build-${{ hashFiles('**/build.gradle', '**/gradle.properties') }}
-
-      # Hilt依赖需要https协议
-      - name: Add google repository
-        run: sed -i 's/maven { url /maven { url "https:/' settings.gradle
-
-      # 接受所有许可证
-      - name: Accept licenses
-        run: yes | $ANDROID_HOME/tools/bin/sdkmanager --licenses
-
-      # 使用守护进程提升构建速度
-      - name: Build APK
+      - name: Android Assemble
         env:
-          CCACHE_DIR: "${{ github.workspace }}/.ccache"
-          CCACHE_COMPRESS: true
-        run: |
-          ./gradlew assembleRelease \
-            --no-daemon \
-            --parallel \
-            --build-cache \
-            -Pkotlin.compiler.execution.strategy=in-process \
-            -x lint
+          CMAKE_C_COMPILER_LAUNCHER: "ccache"
+          CMAKE_CXX_COMPILER_LAUNCHER: "ccache"
+          CCACHE_COMPILERCHECK: "string:${{ env.NDK_VERSION }}"
+        run: ./gradlew --no-daemon --stacktrace --build-cache --parallel --configure-on-demand assembleDevRelease assembleDevReldebug
 
-      # 上传构建结果
-      - name: Upload APK
+      - name: Rename APKs
+        if: ${{ vars.UPLOAD_ARTIFACTS == 'true' }}
+        run: |
+          mv app/build/outputs/apk/dev/release/app-dev-release.apk strato-release.apk
+          mv app/build/outputs/apk/dev/reldebug/app-dev-reldebug.apk strato-reldebug.apk
+
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: |
-            app/build/outputs/apk/**/*.apk
-          retention-days: 7
+          name: strato-release.apk
+          path: strato-release.apk
